@@ -11,7 +11,7 @@ std = [
     'executive/std',
     'aura/std',
     'indices/std',
-    'primitives/std',
+    'runtime-primitives/std',
     'system/std',
     'timestamp/std',
     'sudo/std',
@@ -27,6 +27,7 @@ std = [
     'finality-tracker/std',
     'session/std',
     'treasury/std',
+    'consensus_authorities/std'
 ]
 
 [package]
