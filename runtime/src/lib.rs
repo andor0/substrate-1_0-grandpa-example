@@ -12,15 +12,18 @@ use rstd::prelude::*;
 #[cfg(feature = "std")]
 use primitives::bytes;
 use primitives::{ed25519, sr25519, OpaqueMetadata};
+use primitives::u32_trait::{_2, _4};
 use runtime_primitives::{
 	ApplyResult, transaction_validity::TransactionValidity, generic, create_runtime_str,
-	traits::{self, NumberFor, BlakeTwo256, Block as BlockT, StaticLookup, Verify}
+	traits::{self, NumberFor, BlakeTwo256, Block as BlockT, Convert, DigestFor, StaticLookup, Verify}
 };
+use grandpa::fg_primitives::{self, ScheduledChange};
 use client::{
 	block_builder::api::{CheckInherentsResult, InherentData, self as block_builder_api},
 	runtime_api, impl_runtime_apis
 };
 use version::RuntimeVersion;
+use council::{motions as council_motions, voting as council_voting};
 #[cfg(feature = "std")]
 use version::NativeVersion;
 
@@ -109,6 +112,20 @@ pub fn native_version() -> NativeVersion {
 	}
 }
 
+pub struct CurrencyToVoteHandler;
+
+impl CurrencyToVoteHandler {
+	fn factor() -> u128 { (Balances::total_issuance() / u64::max_value() as u128).max(1) }
+}
+
+impl Convert<u128, u64> for CurrencyToVoteHandler {
+	fn convert(x: u128) -> u64 { (x / Self::factor()) as u64 }
+}
+
+impl Convert<u128, u128> for CurrencyToVoteHandler {
+	fn convert(x: u128) -> u128 { x * Self::factor() }
+}
+
 impl system::Trait for Runtime {
 	/// The identifier used to distinguish between accounts.
 	type AccountId = AccountId;
@@ -135,7 +152,7 @@ impl system::Trait for Runtime {
 }
 
 impl aura::Trait for Runtime {
-	type HandleReport = ();
+	type HandleReport = aura::StakingSlasher<Runtime>;
 }
 
 impl consensus::Trait for Runtime {
@@ -166,6 +183,53 @@ impl timestamp::Trait for Runtime {
 	type OnTimestampSet = Aura;
 }
 
+impl session::Trait for Runtime {
+	type ConvertAccountIdToSessionKey = ();
+//	type OnSessionChange = (Staking, grandpa::SyncedAuthorities<Runtime>);
+	type OnSessionChange = Staking;
+	type Event = Event;
+}
+
+impl staking::Trait for Runtime {
+	type Currency = balances::Module<Self>;
+	type CurrencyToVote = CurrencyToVoteHandler;
+	type OnRewardMinted = Treasury;
+	type Event = Event;
+	type Slash = ();
+	type Reward = ();
+}
+
+impl democracy::Trait for Runtime {
+	type Currency = balances::Module<Self>;
+	type Proposal = Call;
+	type Event = Event;
+}
+
+impl council::Trait for Runtime {
+	type Event = Event;
+	type BadPresentation = ();
+	type BadReaper = ();
+}
+
+impl council::voting::Trait for Runtime {
+	type Event = Event;
+}
+
+impl council::motions::Trait for Runtime {
+	type Origin = Origin;
+	type Proposal = Call;
+	type Event = Event;
+}
+
+impl treasury::Trait for Runtime {
+	type Currency = balances::Module<Self>;
+	type ApproveOrigin = council_motions::EnsureMembers<_4>;
+	type RejectOrigin = council_motions::EnsureMembers<_2>;
+	type Event = Event;
+	type MintedForSpending = ();
+	type ProposalRejection = ();
+}
+
 impl balances::Trait for Runtime {
 	/// The type for recording an account's balance.
 	type Balance = u128;
@@ -187,6 +251,16 @@ impl sudo::Trait for Runtime {
 	type Proposal = Call;
 }
 
+impl grandpa::Trait for Runtime {
+	type SessionKey = AuthorityId;
+	type Log = Log;
+	type Event = Event;
+}
+
+impl finality_tracker::Trait for Runtime {
+	type OnFinalizationStalled = grandpa::SyncedAuthorities<Runtime>;
+}
+
 /// Used for the module template in `./template.rs`
 impl template::Trait for Runtime {
 	type Event = Event;
@@ -204,6 +278,15 @@ construct_runtime!(
 		Aura: aura::{Module},
 		Indices: indices,
 		Balances: balances,
+		Session: session,
+		Staking: staking::{default, OfflineWorker},
+		Democracy: democracy,
+		Council: council::{Module, Call, Storage, Event<T>},
+		CouncilVoting: council_voting,
+		CouncilMotions: council_motions::{Module, Call, Storage, Event<T>, Origin},
+		FinalityTracker: finality_tracker::{Module, Call, Inherent},
+		Grandpa: grandpa::{Module, Call, Storage, Config<T>, Log(), Event<T>},
+		Treasury: treasury,
 		Sudo: sudo,
 		// Used for the module template in `./template.rs`
 		TemplateModule: template::{Module, Call, Storage, Event<T>},
@@ -278,6 +361,40 @@ impl_runtime_apis! {
 	impl runtime_api::TaggedTransactionQueue<Block> for Runtime {
 		fn validate_transaction(tx: <Block as BlockT>::Extrinsic) -> TransactionValidity {
 			Executive::validate_transaction(tx)
+		}
+	}
+
+	impl fg_primitives::GrandpaApi<Block> for Runtime {
+		fn grandpa_pending_change(digest: &DigestFor<Block>)
+			-> Option<ScheduledChange<NumberFor<Block>>>
+		{
+			for log in digest.logs.iter().filter_map(|l| match l {
+				Log(InternalLog::grandpa(grandpa_signal)) => Some(grandpa_signal),
+				_ => None
+			}) {
+				if let Some(change) = Grandpa::scrape_digest_change(log) {
+					return Some(change);
+				}
+			}
+			None
+		}
+
+		fn grandpa_forced_change(digest: &DigestFor<Block>)
+			-> Option<(NumberFor<Block>, ScheduledChange<NumberFor<Block>>)>
+		{
+			for log in digest.logs.iter().filter_map(|l| match l {
+				Log(InternalLog::grandpa(grandpa_signal)) => Some(grandpa_signal),
+				_ => None
+			}) {
+				if let Some(change) = Grandpa::scrape_digest_forced_change(log) {
+					return Some(change);
+				}
+			}
+			None
+		}
+
+		fn grandpa_authorities() -> Vec<(AuthorityId, u64)> {
+			Grandpa::grandpa_authorities()
 		}
 	}
 
